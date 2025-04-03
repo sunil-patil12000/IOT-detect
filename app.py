@@ -3,9 +3,7 @@ import cv2
 import numpy as np
 import os
 import requests
-import asyncio
 import threading
-from telegram import Bot
 import io
 import time
 import logging
@@ -26,11 +24,8 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = "7555720722:AAHnCQW2M70jIFH1Ol08lO9UDqp2RBHqmSc"
 TELEGRAM_CHAT_ID = "7081127777"  # The chat ID where notifications will be sent
 
-# Create a bot instance
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
-# Function to send message and image to Telegram
-async def send_to_telegram(image, detections):
+# Synchronous function to send message and image to Telegram
+def send_telegram_notification(image, detections):
     try:
         # Create message with detections
         if detections:
@@ -48,25 +43,43 @@ async def send_to_telegram(image, detections):
         if not is_success:
             raise Exception("Failed to encode image")
         
-        img_bytes = io.BytesIO(buffer)
+        # API endpoint for sending photo
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         
-        # Send the image first
-        await bot.send_photo(
-            chat_id=TELEGRAM_CHAT_ID,
-            photo=img_bytes,
-            caption="Processed Image"
-        )
+        # First send the image
+        files = {'photo': ('image.jpg', buffer.tobytes(), 'image/jpeg')}
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': "Processed Image"}
         
-        # Send detection results
-        await bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=message
-        )
+        response = requests.post(url, files=files, data=data)
+        response.raise_for_status()
+        logger.info("Image sent to Telegram successfully")
+        
+        # Send the detection results text
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
+        
+        response = requests.post(url, data=data)
+        response.raise_for_status()
+        logger.info("Message sent to Telegram successfully")
         
         return True
     except Exception as e:
         logger.error(f"Error sending to Telegram: {str(e)}")
+        logger.error(traceback.format_exc())
         return False
+
+def notify_telegram_thread(image, detections):
+    """Send Telegram notification in a separate thread"""
+    def thread_function():
+        try:
+            send_telegram_notification(image, detections)
+        except Exception as e:
+            logger.error(f"Error in telegram thread: {str(e)}")
+            logger.error(traceback.format_exc())
+    
+    thread = threading.Thread(target=thread_function)
+    thread.daemon = True
+    thread.start()
 
 def draw_boxes(img, detections):
     try:
@@ -101,30 +114,6 @@ def draw_boxes(img, detections):
     except Exception as e:
         logger.error(f"Error drawing boxes: {str(e)}")
         return img  # Return original image if drawing fails
-
-def notify_telegram_async(image, detections):
-    """Run the async function in a new thread with proper error handling"""
-    def run_async_func():
-        try:
-            # Create a new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                # Run the async function in this loop
-                loop.run_until_complete(send_to_telegram(image, detections))
-            except Exception as e:
-                logger.error(f"Error in telegram notification: {str(e)}")
-                logger.error(traceback.format_exc())
-            finally:
-                # Close the loop properly when done
-                loop.close()
-        except Exception as e:
-            logger.error(f"Critical error in telegram thread: {str(e)}")
-            logger.error(traceback.format_exc())
-    
-    # Start as daemon thread so it doesn't block program exit
-    thread = threading.Thread(target=run_async_func, daemon=True)
-    thread.start()
 
 # Load YOLO model
 def load_yolo():
@@ -301,7 +290,7 @@ def detect_objects():
         # Send notification to Telegram bot (non-blocking)
         logger.info("Sending notification to Telegram")
         try:
-            notify_telegram_async(img, results)
+            notify_telegram_thread(img, results)
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {str(e)}")
             # Continue processing even if Telegram notification fails
