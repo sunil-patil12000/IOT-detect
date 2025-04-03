@@ -8,6 +8,17 @@ import threading
 from telegram import Bot
 import io
 import time
+import logging
+import sys
+import traceback
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -54,46 +65,62 @@ async def send_to_telegram(image, detections):
         
         return True
     except Exception as e:
-        print(f"Error sending to Telegram: {str(e)}")
+        logger.error(f"Error sending to Telegram: {str(e)}")
         return False
 
 def draw_boxes(img, detections):
-    height, width, _ = img.shape
-    
-    # Load class information
-    classes = []
-    with open("coco.names", "r") as f:
-        classes = [line.strip() for line in f.readlines()]
-    
-    colors = np.random.uniform(0, 255, size=(len(classes), 3))
-    
-    # Draw bounding boxes based on detection results
-    for detection in detections:
-        class_name = detection["class"]
+    try:
+        height, width, _ = img.shape
         
-        # If we have box coordinates, use them
-        if "box" in detection:
-            x, y, w, h = detection["box"]
-            class_idx = classes.index(class_name)
-            color = colors[class_idx].tolist()
+        # Load class information
+        classes = []
+        with open("coco.names", "r") as f:
+            classes = [line.strip() for line in f.readlines()]
+        
+        colors = np.random.uniform(0, 255, size=(len(classes), 3))
+        
+        # Draw bounding boxes based on detection results
+        for detection in detections:
+            class_name = detection["class"]
             
-            cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(img, class_name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-    
-    return img
+            # If we have box coordinates, use them
+            if "box" in detection:
+                x, y, w, h = detection["box"]
+                try:
+                    class_idx = classes.index(class_name)
+                    color = colors[class_idx].tolist()
+                    
+                    cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
+                    cv2.putText(img, class_name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                except ValueError:
+                    # If class name is not found in classes list
+                    cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.putText(img, class_name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        return img
+    except Exception as e:
+        logger.error(f"Error drawing boxes: {str(e)}")
+        return img  # Return original image if drawing fails
 
 def notify_telegram_async(image, detections):
-    """Run the async function in a new thread with proper event loop handling"""
+    """Run the async function in a new thread with proper error handling"""
     def run_async_func():
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            # Run the async function in this loop
-            loop.run_until_complete(send_to_telegram(image, detections))
-        finally:
-            # Close the loop properly when done
-            loop.close()
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Run the async function in this loop
+                loop.run_until_complete(send_to_telegram(image, detections))
+            except Exception as e:
+                logger.error(f"Error in telegram notification: {str(e)}")
+                logger.error(traceback.format_exc())
+            finally:
+                # Close the loop properly when done
+                loop.close()
+        except Exception as e:
+            logger.error(f"Critical error in telegram thread: {str(e)}")
+            logger.error(traceback.format_exc())
     
     # Start as daemon thread so it doesn't block program exit
     thread = threading.Thread(target=run_async_func, daemon=True)
@@ -101,13 +128,32 @@ def notify_telegram_async(image, detections):
 
 # Load YOLO model
 def load_yolo():
-    net = cv2.dnn.readNet("yolov3.weights", "yolov3.cfg")
-    classes = []
-    with open("coco.names", "r") as f:
-        classes = [line.strip() for line in f.readlines()]
-    layers_names = net.getLayerNames()
-    output_layers = [layers_names[i-1] for i in net.getUnconnectedOutLayers()]
-    return net, classes, output_layers
+    try:
+        # Check if all required files exist
+        required_files = ["yolov3.weights", "yolov3.cfg", "coco.names"]
+        for file in required_files:
+            if not os.path.exists(file):
+                download_yolo_files()
+                break
+                
+        net = cv2.dnn.readNet("yolov3.weights", "yolov3.cfg")
+        classes = []
+        with open("coco.names", "r") as f:
+            classes = [line.strip() for line in f.readlines()]
+        layers_names = net.getLayerNames()
+        
+        # Handle different versions of OpenCV
+        try:
+            output_layers = [layers_names[i - 1] for i in net.getUnconnectedOutLayers()]
+        except:
+            output_layers = [layers_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+            
+        logger.info("YOLO model loaded successfully")
+        return net, classes, output_layers
+    except Exception as e:
+        logger.error(f"Error loading YOLO model: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 # Download required files if they don't exist
 def download_yolo_files():
@@ -117,14 +163,19 @@ def download_yolo_files():
         "coco.names": "https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names"
     }
     
+    current_dir = os.getcwd()
+    logger.info(f"Current working directory: {current_dir}")
+    logger.info(f"Directory contents: {os.listdir(current_dir)}")
+    
     for filename, url in urls.items():
-        if not os.path.exists(filename):
-            print(f"Downloading {filename}...")
+        filepath = os.path.join(current_dir, filename)
+        if not os.path.exists(filepath):
+            logger.info(f"Downloading {filename} from {url}")
             try:
                 response = requests.get(url, stream=True)
                 response.raise_for_status()
                 
-                with open(filename, 'wb') as f:
+                with open(filepath, 'wb') as f:
                     if filename == "yolov3.weights":
                         # For weights file, download in chunks due to large size
                         for chunk in response.iter_content(chunk_size=8192):
@@ -132,31 +183,64 @@ def download_yolo_files():
                                 f.write(chunk)
                     else:
                         f.write(response.content)
-                print(f"Successfully downloaded {filename}")
+                logger.info(f"Successfully downloaded {filename}")
             except Exception as e:
-                print(f"Error downloading {filename}: {str(e)}")
+                logger.error(f"Error downloading {filename}: {str(e)}")
+                logger.error(traceback.format_exc())
                 raise
+
+# Health check endpoint
+@app.route('/health', methods=['GET'])
+def health_check():
+    try:
+        # Check if YOLO files exist
+        files_status = {}
+        for file in ["yolov3.weights", "yolov3.cfg", "coco.names"]:
+            files_status[file] = os.path.exists(file)
+        
+        return jsonify({
+            "status": "healthy",
+            "files": files_status,
+            "working_directory": os.getcwd()
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e)
+        }), 500
 
 @app.route('/detect', methods=['POST'])
 def detect_objects():
     try:
+        logger.info("Received detection request")
+        
         # Check if image is in request
         if 'image' not in request.files:
+            logger.warning("No image provided in request")
             return jsonify({"error": "No image provided"}), 400
         
         file = request.files['image']
         if file.filename == '':
+            logger.warning("Empty filename in request")
             return jsonify({"error": "No selected file"}), 400
 
         # Read image
+        logger.info("Reading image data")
         file_bytes = file.read()
         img = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            logger.error("Failed to decode image")
+            return jsonify({"error": "Failed to decode image"}), 400
+            
         height, width, _ = img.shape
+        logger.info(f"Image size: {width}x{height}")
 
         # Load YOLO model
+        logger.info("Loading YOLO model")
         net, classes, output_layers = load_yolo()
 
         # Detecting objects
+        logger.info("Processing image with YOLO")
         blob = cv2.dnn.blobFromImage(img, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
         net.setInput(blob)
         outs = net.forward(output_layers)
@@ -188,12 +272,25 @@ def detect_objects():
                     class_ids.append(class_id)
 
         # Apply non-max suppression
-        indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+        logger.info("Applying non-max suppression")
+        if len(boxes) > 0:
+            indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+        else:
+            indexes = []
 
         # Prepare results
         results = []
+        logger.info(f"Found {len(indexes)} objects after non-max suppression")
+        
+        # Check if indexes is a numpy array or list
+        if isinstance(indexes, np.ndarray):
+            indexes_list = indexes.flatten()
+        else:
+            # For older OpenCV versions
+            indexes_list = [i for i in indexes]
+            
         for i in range(len(boxes)):
-            if i in indexes:
+            if i in indexes_list:
                 x, y, w, h = boxes[i]
                 label = str(classes[class_ids[i]])
                 results.append({
@@ -201,8 +298,13 @@ def detect_objects():
                     "box": [x, y, w, h]  # Include box coordinates for drawing
                 })
         
-        # Send notification to Telegram bot
-        notify_telegram_async(img, results)
+        # Send notification to Telegram bot (non-blocking)
+        logger.info("Sending notification to Telegram")
+        try:
+            notify_telegram_async(img, results)
+        except Exception as e:
+            logger.error(f"Failed to send Telegram notification: {str(e)}")
+            # Continue processing even if Telegram notification fails
 
         # Remove box coordinates from API response if not needed
         api_results = []
@@ -211,14 +313,26 @@ def detect_objects():
                 "class": result["class"]
             })
 
+        logger.info("Returning detection results")
         return jsonify({"detections": api_results})
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error in detection endpoint: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "error": str(e), 
+            "traceback": traceback.format_exc()
+        }), 500
 
 if __name__ == '__main__':
-    # Download required files
-    download_yolo_files()
-    # Run the app
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    try:
+        # Download required files
+        download_yolo_files()
+        
+        # Run the app
+        port = int(os.environ.get("PORT", 5000))
+        logger.info(f"Starting Flask app on port {port}")
+        app.run(debug=False, host='0.0.0.0', port=port)
+    except Exception as e:
+        logger.error(f"Error starting app: {str(e)}")
+        logger.error(traceback.format_exc())
