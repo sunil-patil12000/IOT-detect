@@ -1,0 +1,6 @@
+flask
+opencv-python
+numpy
+requests
+gunicorn
+python-telegram-bot>=20.0
